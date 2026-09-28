@@ -4,6 +4,7 @@ import { Button } from '../../components/common/Button.jsx';
 import { Badge } from '../../components/common/Badge.jsx';
 import { useToast } from '../../components/common/ToastContext.jsx';
 import { CommissionGridFilterSelect } from './CommissionGridFilterSelect.jsx';
+import { apiUrl } from '../../config/api.js';
 
 const ACCEPTED_TYPES = [
   'application/pdf',
@@ -268,7 +269,7 @@ export function CommissionGrid() {
       formData.append('file', selectedFile);
       if (companyName.trim()) formData.append('company', companyName.trim());
 
-      const response = await fetch('/api/grid/extract', {
+      const response = await fetch(apiUrl('/api/grid/extract'), {
         method: 'POST',
         body: formData,
       });

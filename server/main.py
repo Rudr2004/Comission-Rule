@@ -23,9 +23,14 @@ load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
 app = FastAPI(title="Sama Grid Extraction Server")
 
+# CORS_ALLOWED_ORIGINS: comma-separated list (e.g. the Vercel frontend URL).
+# Defaults to "*" so local dev keeps working without any env var set.
+_allowed_origins_raw = os.environ.get("CORS_ALLOWED_ORIGINS", "*").strip()
+ALLOWED_ORIGINS = ["*"] if _allowed_origins_raw == "*" else [o.strip() for o in _allowed_origins_raw.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
