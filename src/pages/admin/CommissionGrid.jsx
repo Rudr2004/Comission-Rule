@@ -60,6 +60,32 @@ function slabHasAnyFuelValue(slab) {
   return FUEL_COLUMNS.some((col) => slab[col.key] != null || slab[col.noteKey]);
 }
 
+// Every distinct rate value shown in an item's Rates column (e.g. "45%", "IRDA"),
+// used both to build the Rates filter options and to match items against it.
+function rateLabelsFor(item) {
+  const labels = [];
+  for (const rate of item.rates || []) {
+    for (const col of FUEL_COLUMNS) {
+      const label = formatPercent(rate[col.key], rate[col.noteKey]);
+      if (label !== '—') labels.push(label);
+    }
+    const allFuel = formatPercent(rate.allFuelPercent, rate.note);
+    if (allFuel !== '—') labels.push(allFuel);
+  }
+  return labels;
+}
+
+function compareRateLabels(a, b) {
+  const na = parseFloat(a);
+  const nb = parseFloat(b);
+  const aNum = a.endsWith('%') && !Number.isNaN(na);
+  const bNum = b.endsWith('%') && !Number.isNaN(nb);
+  if (aNum && bNum) return na - nb;
+  if (aNum) return -1;
+  if (bNum) return 1;
+  return a.localeCompare(b);
+}
+
 // Deterministic color assignment so the same company/policy-type always gets
 // the same pill color across every row and every re-render, without needing
 // to track assignments in state.
@@ -116,6 +142,7 @@ export function CommissionGrid() {
   const [subProductFilter, setSubProductFilter] = useState('all');
   const [policyTypeFilter, setPolicyTypeFilter] = useState('all');
   const [rtoFilter, setRtoFilter] = useState('all');
+  const [rateFilter, setRateFilter] = useState('all');
   const [page, setPage] = useState(1);
   const [activeSheet, setActiveSheet] = useState('all');
 
@@ -162,6 +189,7 @@ export function CommissionGrid() {
     setSubProductFilter('all');
     setPolicyTypeFilter('all');
     setRtoFilter('all');
+    setRateFilter('all');
     setPage(1);
   };
 
@@ -171,6 +199,10 @@ export function CommissionGrid() {
   const products = useMemo(() => uniqueSorted(lineItems.map((item) => item.product)), [lineItems]);
   const policyTypes = useMemo(() => uniqueSorted(lineItems.map((item) => item.policyType)), [lineItems]);
   const rtos = useMemo(() => uniqueSorted(lineItems.map((item) => item.rto)), [lineItems]);
+  const rateOptions = useMemo(
+    () => Array.from(new Set(lineItems.flatMap(rateLabelsFor))).sort(compareRateLabels),
+    [lineItems]
+  );
 
   // Sub-product options narrow to whatever's actually available under the selected product (class),
   // matching how these grids are organized (e.g. 2W -> SCOOTER/BIKE, CAR -> ALL/tonnage-or-CC bands).
@@ -198,6 +230,7 @@ export function CommissionGrid() {
       clear: () => setPolicyTypeFilter('all'),
     },
     rtoFilter !== 'all' && { key: 'rto', label: `RTO: ${rtoFilter}`, clear: () => setRtoFilter('all') },
+    rateFilter !== 'all' && { key: 'rate', label: `Rate: ${rateFilter}`, clear: () => setRateFilter('all') },
     search.trim() && { key: 'search', label: `Search: "${search.trim()}"`, clear: () => setSearch('') },
   ].filter(Boolean);
 
@@ -209,6 +242,7 @@ export function CommissionGrid() {
       if (subProductFilter !== 'all' && item.subProduct !== subProductFilter) return false;
       if (policyTypeFilter !== 'all' && item.policyType !== policyTypeFilter) return false;
       if (rtoFilter !== 'all' && item.rto !== rtoFilter) return false;
+      if (rateFilter !== 'all' && !rateLabelsFor(item).includes(rateFilter)) return false;
       if (!q) return true;
       const slabLabels = (item.rates || []).map((r) => r.slabLabel).filter(Boolean);
       const haystack = [
@@ -226,7 +260,7 @@ export function CommissionGrid() {
         .toLowerCase();
       return haystack.includes(q);
     });
-  }, [lineItems, search, companyFilter, productFilter, subProductFilter, policyTypeFilter, rtoFilter]);
+  }, [lineItems, search, companyFilter, productFilter, subProductFilter, policyTypeFilter, rtoFilter, rateFilter]);
 
   const totalPages = Math.max(1, Math.ceil(filteredLineItems.length / PAGE_SIZE));
   const currentPage = Math.min(page, totalPages);
@@ -290,6 +324,7 @@ export function CommissionGrid() {
       setSubProductFilter('all');
       setPolicyTypeFilter('all');
       setRtoFilter('all');
+      setRateFilter('all');
       setPage(1);
       setActiveSheet('all');
       toast.success('Grid extracted', `Parsed ${data.extraction?.lineItems?.length ?? 0} line item(s) from ${data.fileName}.`);
@@ -312,6 +347,7 @@ export function CommissionGrid() {
     setSubProductFilter('all');
     setPolicyTypeFilter('all');
     setRtoFilter('all');
+    setRateFilter('all');
     setPage(1);
     setActiveSheet('all');
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -348,6 +384,11 @@ export function CommissionGrid() {
     setPage(1);
   };
 
+  const handleRateFilterChange = (value) => {
+    setRateFilter(value);
+    setPage(1);
+  };
+
   const handleClearAllFilters = () => {
     setSearch('');
     setCompanyFilter('all');
@@ -355,6 +396,7 @@ export function CommissionGrid() {
     setSubProductFilter('all');
     setPolicyTypeFilter('all');
     setRtoFilter('all');
+    setRateFilter('all');
     setPage(1);
   };
 
@@ -597,6 +639,16 @@ export function CommissionGrid() {
                     options={rtos}
                     allLabel={`All RTOs (${rtos.length})`}
                     disabled={rtos.length === 0}
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="text-xs font-medium text-slate-500">Rates</span>
+                  <CommissionGridFilterSelect
+                    value={rateFilter}
+                    onChange={handleRateFilterChange}
+                    options={rateOptions}
+                    allLabel={`All rates (${rateOptions.length})`}
+                    disabled={rateOptions.length === 0}
                   />
                 </label>
               </div>
