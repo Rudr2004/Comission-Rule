@@ -1055,16 +1055,16 @@ export function CommissionGrid() {
                       {entry.createdAt ? new Date(entry.createdAt).toLocaleString() : '—'}
                     </td>
                     <td className="py-2.5 px-5 whitespace-nowrap text-right space-x-2">
-                      <Button
+                      {/* <Button
                         size="sm"
                         onClick={() => handleViewOriginalFile(entry)}
                         disabled={!entry.hasFile}
                         title={entry.hasFile ? 'Open the original uploaded file' : 'Original file was not stored for this older entry'}
                       >
                         View
-                      </Button>
+                      </Button> */}
                       <Button size="sm" onClick={() => handleViewHistory(entry.id)} disabled={loadingHistoryId === entry.id}>
-                        {loadingHistoryId === entry.id ? 'Opening…' : 'Open Grid'}
+                        {loadingHistoryId === entry.id ? 'Opening…' : 'View Grid'}
                       </Button>
                       <Button size="sm" variant="ghost" onClick={() => setDeleteTarget(entry)}>
                         Delete
