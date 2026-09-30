@@ -179,24 +179,37 @@ export function CommissionGrid() {
   const monthOptions = useMemo(getMonthOptions, []);
   const [uploadMonth, setUploadMonth] = useState(() => getMonthOptions()[0].value);
   const [uploadTime, setUploadTime] = useState(currentTimeValue);
-  const [history, setHistory] = useState({ enabled: false, items: [] });
+  const [history, setHistory] = useState({ enabled: false, items: [], status: 'loading' }); // status: loading | ready | error
   const [loadingHistoryId, setLoadingHistoryId] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null); // history entry awaiting delete confirmation
   const [isDeleting, setIsDeleting] = useState(false);
 
-  const refreshHistory = async () => {
+  // History lives in MongoDB behind the API, so every browser sees the same list. The hosted
+  // backend can be asleep (cold start) or briefly unreachable, so failures are retried and
+  // surfaced with a Retry button instead of silently showing an empty list.
+  const refreshHistory = async (attempt = 0) => {
+    if (attempt === 0) setHistory((h) => ({ ...h, status: 'loading' }));
     try {
-      const response = await fetch(apiUrl('/api/grid/history'));
-      if (!response.ok) return;
+      const response = await fetch(apiUrl('/api/grid/history'), { cache: 'no-store' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
-      setHistory({ enabled: !!data.enabled, items: data.items || [] });
+      setHistory({ enabled: !!data.enabled, items: data.items || [], status: 'ready' });
     } catch {
-      // History is optional — if the server/DB is unreachable the panel simply stays hidden.
+      if (attempt < 3) {
+        setTimeout(() => refreshHistory(attempt + 1), 4000 * (attempt + 1));
+      } else {
+        setHistory((h) => ({ ...h, status: 'error' }));
+      }
     }
   };
 
   useEffect(() => {
     refreshHistory();
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') refreshHistory(1);
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
   }, []);
 
   useEffect(() => {
@@ -1024,9 +1037,22 @@ export function CommissionGrid() {
         />
         {history.items.length === 0 ? (
           <CardBody>
-            <p className="text-sm text-slate-500">No uploads yet.</p>
-            {!history.enabled && (
-              <p className="text-xs text-slate-400 mt-1">History storage isn't connected yet (MONGODB_URL not set on the server).</p>
+            {history.status === 'loading' ? (
+              <p className="text-sm text-slate-500">Loading history… the server may take a few seconds to wake up.</p>
+            ) : history.status === 'error' ? (
+              <div className="flex items-center gap-3">
+                <p className="text-sm text-red-600">Couldn't load history from the server.</p>
+                <Button size="sm" onClick={() => refreshHistory()}>
+                  Retry
+                </Button>
+              </div>
+            ) : (
+              <>
+                <p className="text-sm text-slate-500">No uploads yet.</p>
+                {!history.enabled && (
+                  <p className="text-xs text-slate-400 mt-1">History storage isn't connected yet (MONGODB_URL not set on the server).</p>
+                )}
+              </>
             )}
           </CardBody>
         ) : (
