@@ -12,3 +12,5 @@ services:
         sync: false
       - key: CORS_ALLOWED_ORIGINS
         sync: false
+      - key: MONGODB_URL
+        sync: false
