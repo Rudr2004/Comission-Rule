@@ -5,6 +5,7 @@ import { Badge } from '../../components/common/Badge.jsx';
 import { useToast } from '../../components/common/ToastContext.jsx';
 import { CommissionGridFilterSelect } from './CommissionGridFilterSelect.jsx';
 import { apiUrl } from '../../config/api.js';
+import { exportCommissionGridToExcel } from '../../utils/exportCommissionGrid.js';
 
 const ACCEPTED_TYPES = [
   'application/pdf',
@@ -114,6 +115,34 @@ function IdentityPill({ label }) {
   );
 }
 
+// Upload month choices: the current month and the next one, as { value: 'YYYY-MM', label }.
+function getMonthOptions() {
+  const now = new Date();
+  return [0, 1].map((offset) => {
+    const d = new Date(now.getFullYear(), now.getMonth() + offset, 1);
+    const value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    return { value, label: d.toLocaleString('en-US', { month: 'long', year: 'numeric' }) };
+  });
+}
+
+function currentTimeValue() {
+  const now = new Date();
+  return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+}
+
+function formatMonthLabel(value) {
+  const match = /^(\d{4})-(\d{2})$/.exec(value || '');
+  if (!match) return value || '—';
+  return new Date(Number(match[1]), Number(match[2]) - 1, 1).toLocaleString('en-US', { month: 'long', year: 'numeric' });
+}
+
+function formatTimeLabel(value) {
+  const match = /^(\d{2}):(\d{2})$/.exec(value || '');
+  if (!match) return value || '—';
+  const h = Number(match[1]);
+  return `${h % 12 || 12}:${match[2]} ${h >= 12 ? 'PM' : 'AM'}`;
+}
+
 function loadStoredResult() {
   try {
     const raw = sessionStorage.getItem(RESULT_STORAGE_KEY);
@@ -129,6 +158,7 @@ function loadStoredResult() {
 export function CommissionGrid() {
   const toast = useToast();
   const fileInputRef = useRef(null);
+  const resultsRef = useRef(null);
 
   const [selectedFile, setSelectedFile] = useState(null);
   const [companyName, setCompanyName] = useState('');
@@ -145,6 +175,29 @@ export function CommissionGrid() {
   const [rateFilter, setRateFilter] = useState('all');
   const [page, setPage] = useState(1);
   const [activeSheet, setActiveSheet] = useState('all');
+  const [isDownloading, setIsDownloading] = useState(false);
+  const monthOptions = useMemo(getMonthOptions, []);
+  const [uploadMonth, setUploadMonth] = useState(() => getMonthOptions()[0].value);
+  const [uploadTime, setUploadTime] = useState(currentTimeValue);
+  const [history, setHistory] = useState({ enabled: false, items: [] });
+  const [loadingHistoryId, setLoadingHistoryId] = useState(null);
+  const [deleteTarget, setDeleteTarget] = useState(null); // history entry awaiting delete confirmation
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  const refreshHistory = async () => {
+    try {
+      const response = await fetch(apiUrl('/api/grid/history'));
+      if (!response.ok) return;
+      const data = await response.json();
+      setHistory({ enabled: !!data.enabled, items: data.items || [] });
+    } catch {
+      // History is optional — if the server/DB is unreachable the panel simply stays hidden.
+    }
+  };
+
+  useEffect(() => {
+    refreshHistory();
+  }, []);
 
   useEffect(() => {
     try {
@@ -302,6 +355,8 @@ export function CommissionGrid() {
       const formData = new FormData();
       formData.append('file', selectedFile);
       if (companyName.trim()) formData.append('company', companyName.trim());
+      formData.append('month', uploadMonth);
+      formData.append('time', uploadTime);
 
       const response = await fetch(apiUrl('/api/grid/extract'), {
         method: 'POST',
@@ -327,9 +382,12 @@ export function CommissionGrid() {
       setRateFilter('all');
       setPage(1);
       setActiveSheet('all');
+      if (data.historyId) refreshHistory();
       toast.success('Grid extracted', `Parsed ${data.extraction?.lineItems?.length ?? 0} line item(s) from ${data.fileName}.`);
     } catch (err) {
       setError(err.message || 'Something went wrong while extracting the grid.');
+      // The server may have finished and saved the upload even though the response never arrived (e.g. a proxy timeout).
+      refreshHistory();
       toast.error('Extraction failed', err.message);
     } finally {
       setIsExtracting(false);
@@ -351,6 +409,93 @@ export function CommissionGrid() {
     setPage(1);
     setActiveSheet('all');
     if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  // Exports exactly what the admin is looking at: current sheet tab + filters, all pages.
+  const handleDownload = async () => {
+    if (filteredLineItems.length === 0) return;
+    setIsDownloading(true);
+    try {
+      const base = (result?.fileName || 'commission-grid').replace(/\.[^.]+$/, '');
+      await exportCommissionGridToExcel({
+        lineItems: filteredLineItems,
+        title: result?.extraction?.documentTitle,
+        fileName: `${base}-commission-grid.xlsx`,
+      });
+      toast.success('Download ready', `Exported ${filteredLineItems.length} line item(s) to Excel.`);
+    } catch (err) {
+      toast.error('Download failed', err.message);
+    } finally {
+      setIsDownloading(false);
+    }
+  };
+
+  const handleViewHistory = async (id) => {
+    setLoadingHistoryId(id);
+    try {
+      const response = await fetch(apiUrl(`/api/grid/history/${id}`));
+      const data = await response.json();
+      if (!response.ok) throw new Error(data?.error || 'Failed to load this history entry.');
+      if (!Array.isArray(data?.extraction?.lineItems)) throw new Error('This history entry is corrupted.');
+      setSelectedFile(null);
+      setResult(data);
+      setError(null);
+      handleClearAllFilters();
+      setActiveSheet('all');
+      setTimeout(() => resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
+    } catch (err) {
+      toast.error('Could not open history entry', err.message);
+    } finally {
+      setLoadingHistoryId(null);
+    }
+  };
+
+  // Fetches the originally uploaded file: PDFs/images open in a new tab, spreadsheets download.
+  const handleViewOriginalFile = async (entry) => {
+    try {
+      const response = await fetch(apiUrl(`/api/grid/history/${entry.id}/file`));
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data?.error || 'Failed to load the original file.');
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const viewable = /^(application\/pdf|image\/)/.test(blob.type);
+      const a = document.createElement('a');
+      a.href = url;
+      if (viewable) {
+        a.target = '_blank';
+        a.rel = 'noopener';
+      } else {
+        a.download = entry.fileName || 'grid-file';
+      }
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      if (!viewable) toast.success('Download started', entry.fileName);
+    } catch (err) {
+      toast.error('Could not open file', err.message);
+    }
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!deleteTarget) return;
+    setIsDeleting(true);
+    try {
+      const response = await fetch(apiUrl(`/api/grid/history/${deleteTarget.id}`), { method: 'DELETE' });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data?.error || 'Failed to delete.');
+      }
+      setHistory((h) => ({ ...h, items: h.items.filter((i) => i.id !== deleteTarget.id) }));
+      toast.success('Deleted', `${deleteTarget.fileName} was removed from history.`);
+      setDeleteTarget(null);
+    } catch (err) {
+      toast.error('Delete failed', err.message);
+    } finally {
+      setIsDeleting(false);
+    }
   };
 
   const handleSearchChange = (e) => {
@@ -423,6 +568,32 @@ export function CommissionGrid() {
               Used to fill in the Company column when the document itself doesn't state it.
             </span>
           </label>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-sm">
+            <label className="flex flex-col gap-1">
+              <span className="text-xs font-medium text-slate-500">Month</span>
+              <select
+                value={uploadMonth}
+                onChange={(e) => setUploadMonth(e.target.value)}
+                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
+              >
+                {monthOptions.map((m) => (
+                  <option key={m.value} value={m.value}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-xs font-medium text-slate-500">Time</span>
+              <input
+                type="time"
+                value={uploadTime}
+                onChange={(e) => setUploadTime(e.target.value)}
+                className="rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
+              />
+            </label>
+          </div>
 
           <div
             onDragOver={(e) => {
@@ -516,6 +687,7 @@ export function CommissionGrid() {
       </Card>
 
       {result && (
+        <div ref={resultsRef} className="scroll-mt-4">
         <Card className="animate-result-fade-in overflow-hidden">
           <div className="flex items-start justify-between gap-4 px-5 py-4 bg-gradient-to-r from-emerald-50 via-white to-white border-b border-slate-100">
             <div className="flex items-start gap-3 min-w-0">
@@ -541,9 +713,19 @@ export function CommissionGrid() {
                 </div>
               </div>
             </div>
-            <Button size="sm" variant="ghost" onClick={handleReset} className="shrink-0">
-              Upload Another
-            </Button>
+            <div className="flex items-center gap-2 shrink-0">
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={handleDownload}
+                disabled={isDownloading || filteredLineItems.length === 0}
+              >
+                {isDownloading ? 'Preparing…' : 'Download Excel'}
+              </Button>
+              <Button size="sm" variant="ghost" onClick={handleReset}>
+                Upload Another
+              </Button>
+            </div>
           </div>
 
           {sheetNames.length > 1 && (
@@ -832,6 +1014,103 @@ export function CommissionGrid() {
             )}
           </CardBody>
         </Card>
+        </div>
+      )}
+
+      <Card>
+        <CardHeader
+          title="Upload History"
+          subtitle="Previously uploaded grids. View the original file, or open the extracted grid to review and download it again."
+        />
+        {history.items.length === 0 ? (
+          <CardBody>
+            <p className="text-sm text-slate-500">No uploads yet.</p>
+            {!history.enabled && (
+              <p className="text-xs text-slate-400 mt-1">History storage isn't connected yet (MONGODB_URL not set on the server).</p>
+            )}
+          </CardBody>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-slate-500 text-[11px] uppercase tracking-wider border-b border-slate-100">
+                  <th className="py-2.5 px-5 font-semibold">Company</th>
+                  <th className="py-2.5 px-3 font-semibold">Month</th>
+                  <th className="py-2.5 px-3 font-semibold">Time</th>
+                  <th className="py-2.5 px-3 font-semibold">File</th>
+                  <th className="py-2.5 px-3 font-semibold">Line items</th>
+                  <th className="py-2.5 px-3 font-semibold">Uploaded</th>
+                  <th className="py-2.5 px-5" />
+                </tr>
+              </thead>
+              <tbody>
+                {history.items.map((entry) => (
+                  <tr key={entry.id} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/60">
+                    <td className="py-2.5 px-5 font-medium text-slate-800">{entry.company || '—'}</td>
+                    <td className="py-2.5 px-3 text-slate-600 whitespace-nowrap">{formatMonthLabel(entry.month)}</td>
+                    <td className="py-2.5 px-3 text-slate-600 whitespace-nowrap">{formatTimeLabel(entry.time)}</td>
+                    <td className="py-2.5 px-3 text-slate-600 max-w-[240px] truncate" title={entry.fileName}>{entry.fileName}</td>
+                    <td className="py-2.5 px-3 text-slate-600">{entry.lineItemCount}</td>
+                    <td className="py-2.5 px-3 text-slate-500 whitespace-nowrap">
+                      {entry.createdAt ? new Date(entry.createdAt).toLocaleString() : '—'}
+                    </td>
+                    <td className="py-2.5 px-5 whitespace-nowrap text-right space-x-2">
+                      <Button
+                        size="sm"
+                        onClick={() => handleViewOriginalFile(entry)}
+                        disabled={!entry.hasFile}
+                        title={entry.hasFile ? 'Open the original uploaded file' : 'Original file was not stored for this older entry'}
+                      >
+                        View
+                      </Button>
+                      <Button size="sm" onClick={() => handleViewHistory(entry.id)} disabled={loadingHistoryId === entry.id}>
+                        {loadingHistoryId === entry.id ? 'Opening…' : 'Open Grid'}
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => setDeleteTarget(entry)}>
+                        Delete
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+
+      {deleteTarget && (
+        <div
+          className="fixed inset-0 bg-slate-900/40 flex items-center justify-center z-50 px-4 animate-modal-backdrop"
+          onClick={() => !isDeleting && setDeleteTarget(null)}
+        >
+          <div
+            className="bg-white rounded-xl shadow-2xl w-full max-w-md animate-modal-panel"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-4">
+              <h3 className="font-semibold text-slate-900">Delete this upload?</h3>
+              <p className="text-sm text-slate-500 mt-1.5">
+                <span className="font-medium text-slate-700">{deleteTarget.fileName}</span>
+                {deleteTarget.company && <> ({deleteTarget.company})</>} will be permanently removed from history.
+                This cannot be undone.
+              </p>
+            </div>
+            <div className="px-5 py-3 border-t border-slate-100 flex justify-end gap-2">
+              <Button size="sm" onClick={() => setDeleteTarget(null)} disabled={isDeleting}>
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                variant="primary"
+                className="!bg-red-600 hover:!bg-red-700"
+                onClick={handleConfirmDelete}
+                disabled={isDeleting}
+              >
+                {isDeleting ? 'Deleting…' : 'Delete'}
+              </Button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
