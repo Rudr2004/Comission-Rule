@@ -5,6 +5,8 @@ import { Badge } from '../../components/common/Badge.jsx';
 import { useToast } from '../../components/common/ToastContext.jsx';
 import { CommissionGridFilterSelect } from './CommissionGridFilterSelect.jsx';
 import { apiUrl } from '../../config/api.js';
+import { BulkGridUpload, MAX_BULK_FILES } from './BulkGridUpload.jsx';
+import { formatPayout, maxPayout, sortByPayout } from '../../utils/payout.js';
 import { exportCommissionGridToExcel } from '../../utils/exportCommissionGrid.js';
 
 const ACCEPTED_TYPES = [
@@ -143,6 +145,15 @@ function formatTimeLabel(value) {
   return `${h % 12 || 12}:${match[2]} ${h >= 12 ? 'PM' : 'AM'}`;
 }
 
+// Shared by the single and bulk uploaders; returns a user-facing problem or null if the file is fine.
+function getFileError(file) {
+  if (!ACCEPTED_TYPES.includes(file.type) && !ACCEPTED_EXTENSION_PATTERN.test(file.name)) {
+    return 'Unsupported file type. Please upload a PDF, PNG, JPG, WEBP, XLSX, or XLSB file.';
+  }
+  if (file.size > MAX_FILE_SIZE_BYTES) return 'File is too large. Maximum size is 20MB.';
+  return null;
+}
+
 function loadStoredResult() {
   try {
     const raw = sessionStorage.getItem(RESULT_STORAGE_KEY);
@@ -160,6 +171,7 @@ export function CommissionGrid() {
   const fileInputRef = useRef(null);
   const resultsRef = useRef(null);
 
+  const [uploadMode, setUploadMode] = useState('single'); // 'single' | 'bulk'
   const [selectedFile, setSelectedFile] = useState(null);
   const [companyName, setCompanyName] = useState('');
   const [isDragging, setIsDragging] = useState(false);
@@ -173,6 +185,7 @@ export function CommissionGrid() {
   const [policyTypeFilter, setPolicyTypeFilter] = useState('all');
   const [rtoFilter, setRtoFilter] = useState('all');
   const [rateFilter, setRateFilter] = useState('all');
+  const [payoutSort, setPayoutSort] = useState('asc'); // combined view only: 'asc' | 'desc' | 'original'
   const [page, setPage] = useState(1);
   const [activeSheet, setActiveSheet] = useState('all');
   const [isDownloading, setIsDownloading] = useState(false);
@@ -242,6 +255,9 @@ export function CommissionGrid() {
     return ordered;
   }, [allLineItems]);
 
+  // A combined result merges several bulk-uploaded grids; it shows "Payout" instead of "Rates" and can be sorted by it.
+  const isCombined = !!result?.combined;
+
   const lineItems = useMemo(() => {
     if (activeSheet === 'all') return allLineItems;
     return allLineItems.filter((item) => item.sourceSheet === activeSheet);
@@ -265,10 +281,13 @@ export function CommissionGrid() {
   const products = useMemo(() => uniqueSorted(lineItems.map((item) => item.product)), [lineItems]);
   const policyTypes = useMemo(() => uniqueSorted(lineItems.map((item) => item.policyType)), [lineItems]);
   const rtos = useMemo(() => uniqueSorted(lineItems.map((item) => item.rto)), [lineItems]);
-  const rateOptions = useMemo(
-    () => Array.from(new Set(lineItems.flatMap(rateLabelsFor))).sort(compareRateLabels),
-    [lineItems]
-  );
+  const rateOptions = useMemo(() => {
+    if (isCombined) {
+      const values = lineItems.map(maxPayout).filter((v) => v !== null);
+      return Array.from(new Set(values)).sort((a, b) => a - b).map(formatPayout);
+    }
+    return Array.from(new Set(lineItems.flatMap(rateLabelsFor))).sort(compareRateLabels);
+  }, [lineItems, isCombined]);
 
   // Sub-product options narrow to whatever's actually available under the selected product (class),
   // matching how these grids are organized (e.g. 2W -> SCOOTER/BIKE, CAR -> ALL/tonnage-or-CC bands).
@@ -296,19 +315,22 @@ export function CommissionGrid() {
       clear: () => setPolicyTypeFilter('all'),
     },
     rtoFilter !== 'all' && { key: 'rto', label: `RTO: ${rtoFilter}`, clear: () => setRtoFilter('all') },
-    rateFilter !== 'all' && { key: 'rate', label: `Rate: ${rateFilter}`, clear: () => setRateFilter('all') },
+    rateFilter !== 'all' && { key: 'rate', label: `${isCombined ? 'Payout' : 'Rate'}: ${rateFilter}`, clear: () => setRateFilter('all') },
     search.trim() && { key: 'search', label: `Search: "${search.trim()}"`, clear: () => setSearch('') },
   ].filter(Boolean);
 
   const filteredLineItems = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return lineItems.filter((item) => {
+    const matched = lineItems.filter((item) => {
       if (companyFilter !== 'all' && item.company !== companyFilter) return false;
       if (productFilter !== 'all' && item.product !== productFilter) return false;
       if (subProductFilter !== 'all' && item.subProduct !== subProductFilter) return false;
       if (policyTypeFilter !== 'all' && item.policyType !== policyTypeFilter) return false;
       if (rtoFilter !== 'all' && item.rto !== rtoFilter) return false;
-      if (rateFilter !== 'all' && !rateLabelsFor(item).includes(rateFilter)) return false;
+      if (rateFilter !== 'all') {
+        const matches = isCombined ? formatPayout(maxPayout(item)) === rateFilter : rateLabelsFor(item).includes(rateFilter);
+        if (!matches) return false;
+      }
       if (!q) return true;
       const slabLabels = (item.rates || []).map((r) => r.slabLabel).filter(Boolean);
       const haystack = [
@@ -326,7 +348,8 @@ export function CommissionGrid() {
         .toLowerCase();
       return haystack.includes(q);
     });
-  }, [lineItems, search, companyFilter, productFilter, subProductFilter, policyTypeFilter, rtoFilter, rateFilter]);
+    return isCombined && payoutSort !== 'original' ? sortByPayout(matched, payoutSort) : matched;
+  }, [lineItems, search, companyFilter, productFilter, subProductFilter, policyTypeFilter, rtoFilter, rateFilter, isCombined, payoutSort]);
 
   const totalPages = Math.max(1, Math.ceil(filteredLineItems.length / PAGE_SIZE));
   const currentPage = Math.min(page, totalPages);
@@ -338,12 +361,9 @@ export function CommissionGrid() {
   const validateAndSetFile = (file) => {
     setError(null);
     if (!file) return;
-    if (!ACCEPTED_TYPES.includes(file.type) && !ACCEPTED_EXTENSION_PATTERN.test(file.name)) {
-      setError('Unsupported file type. Please upload a PDF, PNG, JPG, WEBP, XLSX, or XLSB file.');
-      return;
-    }
-    if (file.size > MAX_FILE_SIZE_BYTES) {
-      setError('File is too large. Maximum size is 20MB.');
+    const problem = getFileError(file);
+    if (problem) {
+      setError(problem);
       return;
     }
     setSelectedFile(file);
@@ -434,6 +454,7 @@ export function CommissionGrid() {
         lineItems: filteredLineItems,
         title: result?.extraction?.documentTitle,
         fileName: `${base}-commission-grid.xlsx`,
+        includePayout: isCombined,
       });
       toast.success('Download ready', `Exported ${filteredLineItems.length} line item(s) to Excel.`);
     } catch (err) {
@@ -441,6 +462,16 @@ export function CommissionGrid() {
     } finally {
       setIsDownloading(false);
     }
+  };
+
+  // Shows a freshly extracted bulk result in the grid below, with filters reset.
+  const handleOpenBulkResult = (data) => {
+    setResult(data);
+    setError(null);
+    handleClearAllFilters();
+    setPayoutSort('asc');
+    setActiveSheet('all');
+    setTimeout(() => resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
   };
 
   const handleViewHistory = async (id) => {
@@ -566,6 +597,26 @@ export function CommissionGrid() {
           subtitle="Upload a commission grid document from any insurer or broker — AI will read it and extract a structured breakdown."
         />
         <CardBody className="space-y-4">
+          <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-0.5">
+            {[
+              { key: 'single', label: 'Single upload' },
+              { key: 'bulk', label: `Bulk upload (up to ${MAX_BULK_FILES})` },
+            ].map((tab) => (
+              <button
+                key={tab.key}
+                type="button"
+                onClick={() => setUploadMode(tab.key)}
+                disabled={isExtracting}
+                className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors disabled:cursor-not-allowed ${
+                  uploadMode === tab.key ? 'bg-white text-brand-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          {uploadMode === 'single' && (
           <label className="flex flex-col gap-1 max-w-sm">
             <span className="text-xs font-medium text-slate-500">
               Company / Insurer name <span className="text-red-500">*</span>
@@ -581,6 +632,7 @@ export function CommissionGrid() {
               Used to fill in the Company column when the document itself doesn't state it.
             </span>
           </label>
+          )}
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-sm">
             <label className="flex flex-col gap-1">
@@ -608,6 +660,17 @@ export function CommissionGrid() {
             </label>
           </div>
 
+          {uploadMode === 'bulk' ? (
+            <BulkGridUpload
+              month={uploadMonth}
+              time={uploadTime}
+              getFileError={getFileError}
+              onOpenResult={handleOpenBulkResult}
+              onSaved={refreshHistory}
+              toast={toast}
+            />
+          ) : (
+            <>
           <div
             onDragOver={(e) => {
               e.preventDefault();
@@ -695,6 +758,8 @@ export function CommissionGrid() {
                 <span className="w-1.5 h-1.5 rounded-full bg-brand-400 animate-bounce" />
               </div>
             </div>
+          )}
+            </>
           )}
         </CardBody>
       </Card>
@@ -837,15 +902,32 @@ export function CommissionGrid() {
                   />
                 </label>
                 <label className="flex flex-col gap-1">
-                  <span className="text-xs font-medium text-slate-500">Rates</span>
+                  <span className="text-xs font-medium text-slate-500">{isCombined ? 'Payout' : 'Rates'}</span>
                   <CommissionGridFilterSelect
                     value={rateFilter}
                     onChange={handleRateFilterChange}
                     options={rateOptions}
-                    allLabel={`All rates (${rateOptions.length})`}
+                    allLabel={`${isCombined ? 'All payouts' : 'All rates'} (${rateOptions.length})`}
                     disabled={rateOptions.length === 0}
                   />
                 </label>
+                {isCombined && (
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs font-medium text-slate-500">Sort by payout</span>
+                    <select
+                      value={payoutSort}
+                      onChange={(e) => {
+                        setPayoutSort(e.target.value);
+                        setPage(1);
+                      }}
+                      className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
+                    >
+                      <option value="asc">Low → High</option>
+                      <option value="desc">High → Low</option>
+                      <option value="original">Original order</option>
+                    </select>
+                  </label>
+                )}
               </div>
 
               {activeFilters.length > 0 && (
@@ -885,7 +967,7 @@ export function CommissionGrid() {
                     <th className="py-3 px-3 font-semibold text-[11px] uppercase tracking-wider whitespace-nowrap border border-slate-300">Type</th>
                     <th className="py-3 px-3 font-semibold text-[11px] uppercase tracking-wider whitespace-nowrap border border-slate-300">RTO</th>
                     <th className="py-3 px-3 font-semibold text-[11px] uppercase tracking-wider whitespace-nowrap border border-slate-300">Discount</th>
-                    <th className="py-3 px-3 font-semibold text-[11px] uppercase tracking-wider min-w-[280px] border border-slate-300">Rates</th>
+                    <th className="py-3 px-3 font-semibold text-[11px] uppercase tracking-wider min-w-[280px] border border-slate-300">{isCombined ? 'Payout' : 'Rates'}</th>
                     <th className="py-3 px-3 font-semibold text-[11px] uppercase tracking-wider min-w-[220px] border border-slate-300">Remarks</th>
                     <th className="py-3 px-3 font-semibold text-[11px] uppercase tracking-wider whitespace-nowrap border border-slate-300">Booking</th>
                   </tr>
@@ -912,6 +994,16 @@ export function CommissionGrid() {
                           <RateBadge value={item.discountPercent} note={item.discountNote} />
                         </td>
                         <td className="py-3 px-3 align-top border border-slate-200">
+                          {isCombined && (
+                            <div className="mb-2 flex items-center gap-1.5 text-xs text-slate-500">
+                              Max payout
+                              {maxPayout(item) === null ? (
+                                <span className="text-slate-300">—</span>
+                              ) : (
+                                <Badge tone={rateTone(maxPayout(item))}>{formatPayout(maxPayout(item))}</Badge>
+                              )}
+                            </div>
+                          )}
                           {rates.length === 0 ? (
                             <span className="text-slate-300">—</span>
                           ) : !isMultiSlab && !slabHasAnyFuelValue(rates[0]) ? (
