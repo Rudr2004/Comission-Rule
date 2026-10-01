@@ -1,0 +1,27 @@
+{
+  "default_branch": "development",
+  "branches": [
+    "development",
+    "feature/bulck-grid-UI",
+    "feature/comissionPayout",
+    "feature/download-history",
+    "feature/filter",
+    "origin"
+  ],
+  "parent": {
+    "development": null,
+    "feature/bulck-grid-UI": "development",
+    "feature/comissionPayout": "development",
+    "feature/download-history": "development",
+    "feature/filter": "development",
+    "origin": "development"
+  },
+  "order": [
+    "development",
+    "feature/bulck-grid-UI",
+    "feature/comissionPayout",
+    "feature/download-history",
+    "feature/filter",
+    "origin"
+  ]
+}
