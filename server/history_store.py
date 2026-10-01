@@ -157,3 +157,34 @@ def get_original_file(history_id: str) -> Optional[dict]:
         "contentType": grid_out.content_type or "application/octet-stream",
         "data": grid_out.read(),
     }
+
+
+def latest_grids_per_company(month: str = "") -> list:
+    """The grid to quote against for each company: the upload for `month` if there is one,
+    otherwise that company's most recent upload. Returns full documents (with line items)."""
+    col = _get_collection()
+    summaries = list(col.find({}, {"extraction": 0, "fileId": 0}).sort("createdAt", DESCENDING))
+    chosen = {}
+    for doc in summaries:
+        key = (doc.get("company") or "").strip().lower()
+        if not key:
+            continue
+        current = chosen.get(key)
+        in_month = bool(month) and doc.get("month") == month
+        # summaries are newest-first, so the first doc seen is the newest; a month match overrides it
+        if current is None or (in_month and current.get("month") != month):
+            chosen[key] = doc
+    grids = []
+    for doc in chosen.values():
+        full = col.find_one({"_id": doc["_id"]}, {"extraction.lineItems": 1, "extraction.documentTitle": 1})
+        grids.append(
+            {
+                "id": str(doc["_id"]),
+                "company": doc.get("company", ""),
+                "month": doc.get("month", ""),
+                "time": doc.get("time", ""),
+                "fileName": doc.get("fileName", ""),
+                "extraction": (full or {}).get("extraction") or {},
+            }
+        )
+    return grids
