@@ -1,3 +1,5 @@
+import { maxPayout } from './payout.js';
+
 // Builds a formatted .xlsx from commission grid line items. exceljs is loaded on
 // demand so it doesn't weigh down the initial bundle.
 
@@ -9,7 +11,7 @@ const FUEL_KEYS = [
   ['allFuelPercent', 'note'],
 ];
 
-const COLUMNS = [
+const BASE_COLUMNS = [
   { header: 'Company', width: 18 },
   { header: 'Product', width: 14 },
   { header: 'Sub Product', width: 22 },
@@ -33,21 +35,27 @@ function rateCell(value, note) {
   return note || null;
 }
 
-function toRows(item) {
+function toRows(item, includePayout) {
   const base = [item.company, item.product, item.subProduct, item.policyType, item.rto];
   const discount = rateCell(item.discountPercent, item.discountNote);
   const tail = [item.remarks, item.bookingEntity].map((v) => v || null);
   const rates = item.rates?.length ? item.rates : [{}];
+  const payout = includePayout ? maxPayout(item) : null;
   return rates.map((rate) => [
     ...base.map((v) => v || null),
     discount,
+    ...(includePayout ? [payout === null ? null : payout / 100] : []),
     rate.slabLabel || null,
     ...FUEL_KEYS.map(([k, n]) => rateCell(rate[k], rate[n])),
     ...tail,
   ]);
 }
 
-export async function exportCommissionGridToExcel({ lineItems, title, fileName }) {
+export async function exportCommissionGridToExcel({ lineItems, title, fileName, includePayout = false }) {
+  // Combined (multi-grid) exports get a Payout column: the row's highest rate, in the order shown on screen.
+  const COLUMNS = includePayout
+    ? [...BASE_COLUMNS.slice(0, 6), { header: 'Payout (max)', width: 13, rate: true }, ...BASE_COLUMNS.slice(6)]
+    : BASE_COLUMNS;
   const { default: ExcelJS } = await import('exceljs');
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet('Commission Grid', {
@@ -55,7 +63,7 @@ export async function exportCommissionGridToExcel({ lineItems, title, fileName }
   });
 
   sheet.columns = COLUMNS.map((c) => ({ header: c.header, width: c.width }));
-  lineItems.forEach((item) => toRows(item).forEach((row) => sheet.addRow(row)));
+  lineItems.forEach((item) => toRows(item, includePayout).forEach((row) => sheet.addRow(row)));
 
   const thin = { style: 'thin', color: { argb: 'FFCBD5E1' } };
   const border = { top: thin, left: thin, bottom: thin, right: thin };
