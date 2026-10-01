@@ -13,11 +13,15 @@ from pathlib import Path
 from urllib.parse import quote
 
 from dotenv import load_dotenv
+from typing import Optional
+
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel
 from pymongo.errors import PyMongoError
 
+import grid_quote
 import history_store
 from anthropic_client import extract_grid_from_file
 from validation import apply_fallback_company, validate_extraction
@@ -126,6 +130,53 @@ def get_history(history_id: str):
     if not item:
         raise HTTPException(status_code=404, detail="History entry not found.")
     return {"fileName": item["fileName"], "extraction": item["extraction"], "historyId": item["id"]}
+
+
+class PremiumBreakdown(BaseModel):
+    odPremium: Optional[float] = None
+    tpPremium: Optional[float] = None
+    netPremium: Optional[float] = None
+    grossPremium: Optional[float] = None
+
+
+class QuoteRequest(BaseModel):
+    vehicleClass: str
+    vehicleSubclass: Optional[str] = ""
+    fuelType: str
+    policyType: str
+    caseType: Optional[str] = ""
+    rto: Optional[str] = ""
+    rtoCity: Optional[str] = ""
+    regNumber: Optional[str] = ""
+    ncb: Optional[int] = 0
+    vehicleAge: Optional[float] = None
+    cubicCapacity: Optional[float] = None
+    vehicleMake: Optional[str] = ""
+    vehicleModel: Optional[str] = ""
+    month: Optional[str] = ""
+    premium: Optional[PremiumBreakdown] = None
+
+
+@app.post("/api/grid/quote")
+def quote_from_grids(body: QuoteRequest):
+    """Broker commission for a vehicle, computed from the uploaded commission grids."""
+    _require_history()
+    try:
+        grids = history_store.latest_grids_per_company(body.month or "")
+    except PyMongoError as err:
+        raise HTTPException(status_code=503, detail="Could not reach the history database.") from err
+    if not grids:
+        raise HTTPException(status_code=404, detail="No commission grids have been uploaded yet.")
+    try:
+        payload = body.model_dump()
+        payload["premium"] = (body.premium.model_dump() if body.premium else {})
+        result = grid_quote.quote_vehicle(payload, grids)
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err)) from err
+    result["gridsConsidered"] = [
+        {"company": g["company"], "fileName": g["fileName"], "month": g["month"], "time": g["time"]} for g in grids
+    ]
+    return result
 
 
 @app.get("/api/grid/history/{history_id}/file")
